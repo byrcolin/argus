@@ -13,6 +13,7 @@ import type {
     ForgePlatform,
     Issue,
     Comment,
+    ReviewComment,
     PullRequest,
     FileChange,
     CheckRun,
@@ -118,6 +119,30 @@ export class GitLabForge implements Forge {
         return this.mapComment(data, issueNumber);
     }
 
+    async updateIssue(issueNumber: number, updates: { title?: string; body?: string }): Promise<void> {
+        const payload: Record<string, string> = {};
+        if (updates.title !== undefined) { payload.title = updates.title; }
+        if (updates.body !== undefined) { payload.description = updates.body; }
+        await this.api(`/projects/${this.projectPath}/issues/${issueNumber}`, {
+            method: 'PUT',
+            body: JSON.stringify(payload),
+        });
+    }
+
+    async listRepoLabels(): Promise<string[]> {
+        const labels: string[] = [];
+        let page = 1;
+        while (true) {
+            const data = await this.api<any[]>(
+                `/projects/${this.projectPath}/labels?per_page=100&page=${page}`,
+            );
+            labels.push(...data.map((l: any) => l.name));
+            if (data.length < 100) { break; }
+            page++;
+        }
+        return labels;
+    }
+
     // ─── Pull Requests (Merge Requests in GitLab) ───────────────────
 
     async listPRsForIssue(issueNumber: number): Promise<PullRequest[]> {
@@ -141,6 +166,23 @@ export class GitLabForge implements Forge {
             `/projects/${this.projectPath}/merge_requests/${prNumber}/notes?per_page=100`
         );
         return data.filter((n) => !n.system).map((n) => this.mapComment(n, prNumber));
+    }
+
+    async getPRReviewComments(prNumber: number): Promise<ReviewComment[]> {
+        // GitLab uses "discussions" for inline MR comments on specific diff lines.
+        const data = await this.api<any[]>(
+            `/projects/${this.projectPath}/merge_requests/${prNumber}/discussions?per_page=100`
+        );
+        const result: ReviewComment[] = [];
+        for (const discussion of data) {
+            for (const note of (discussion.notes || [])) {
+                // Only include notes that have a position (inline diff comments)
+                if (note.position && !note.system) {
+                    result.push(this.mapGitLabReviewComment(note, prNumber));
+                }
+            }
+        }
+        return result;
     }
 
     async getPRFiles(prNumber: number): Promise<FileChange[]> {
@@ -436,6 +478,26 @@ export class GitLabForge implements Forge {
             createdAt: new Date(data.created_at),
             updatedAt: new Date(data.updated_at),
             issueNumber,
+        };
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    private mapGitLabReviewComment(note: any, prNumber: number): ReviewComment {
+        const pos = note.position || {};
+        return {
+            id: note.id.toString(),
+            body: note.body || '',
+            author: note.author?.username || 'unknown',
+            authorAssociation: 'NONE',
+            url: '',
+            createdAt: new Date(note.created_at),
+            updatedAt: new Date(note.updated_at),
+            prNumber,
+            path: pos.new_path || pos.old_path || '',
+            line: pos.new_line ?? pos.old_line ?? null,
+            side: pos.old_line && !pos.new_line ? 'LEFT' : 'RIGHT',
+            diffHunk: '',  // GitLab doesn't return diff hunks on note objects
+            inReplyToId: note.in_reply_to_id?.toString(),
         };
     }
 

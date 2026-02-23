@@ -51,6 +51,28 @@ export interface Comment {
     issueNumber: number;
 }
 
+/** Inline review comment on a PR (e.g., from GitHub Copilot, reviewers). */
+export interface ReviewComment {
+    id: string;
+    body: string;
+    author: string;
+    authorAssociation: string;
+    url: string;
+    createdAt: Date;
+    updatedAt: Date;
+    prNumber: number;
+    /** File path the comment is on. */
+    path: string;
+    /** Line number in the diff (may be null for file-level comments). */
+    line: number | null;
+    /** Side of the diff: LEFT (deletion) or RIGHT (addition). */
+    side: 'LEFT' | 'RIGHT';
+    /** Snippet of the diff surrounding the comment. */
+    diffHunk: string;
+    /** If this is a reply, the ID of the parent comment. */
+    inReplyToId?: string;
+}
+
 /** Pull request as returned by the forge. */
 export interface PullRequest {
     id: string;
@@ -142,11 +164,17 @@ export interface Forge {
     addLabel(issueNumber: number, label: string): Promise<void>;
     removeLabel(issueNumber: number, label: string): Promise<void>;
     addComment(issueNumber: number, body: string): Promise<Comment>;
+    /** Update an issue's title and/or body. */
+    updateIssue(issueNumber: number, updates: { title?: string; body?: string }): Promise<void>;
+    /** List all labels available in the repository. */
+    listRepoLabels(): Promise<string[]>;
 
     // --- Pull Requests ---
     listPRsForIssue(issueNumber: number): Promise<PullRequest[]>;
     getPullRequest(prNumber: number): Promise<PullRequest>;
     getPRComments(prNumber: number): Promise<Comment[]>;
+    /** Get inline review comments on a PR (code-level review feedback). */
+    getPRReviewComments(prNumber: number): Promise<ReviewComment[]>;
     getPRFiles(prNumber: number): Promise<FileChange[]>;
     createPullRequest(head: string, base: string, title: string, body: string): Promise<PullRequest>;
     addPRComment(prNumber: number, body: string): Promise<Comment>;

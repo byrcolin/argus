@@ -10,6 +10,7 @@ import type {
     ForgePlatform,
     Issue,
     Comment,
+    ReviewComment,
     PullRequest,
     FileChange,
     CheckRun,
@@ -119,6 +120,33 @@ export class GitHubForge implements Forge {
         return this.mapComment(data, issueNumber);
     }
 
+    async updateIssue(issueNumber: number, updates: { title?: string; body?: string }): Promise<void> {
+        await this.octokit.issues.update({
+            owner: this.owner,
+            repo: this.repo,
+            issue_number: issueNumber,
+            ...(updates.title !== undefined && { title: updates.title }),
+            ...(updates.body !== undefined && { body: updates.body }),
+        });
+    }
+
+    async listRepoLabels(): Promise<string[]> {
+        const labels: string[] = [];
+        let page = 1;
+        while (true) {
+            const { data } = await this.octokit.issues.listLabelsForRepo({
+                owner: this.owner,
+                repo: this.repo,
+                per_page: 100,
+                page,
+            });
+            labels.push(...data.map((l) => l.name));
+            if (data.length < 100) { break; }
+            page++;
+        }
+        return labels;
+    }
+
     // ─── Pull Requests ──────────────────────────────────────────────
 
     async listPRsForIssue(issueNumber: number): Promise<PullRequest[]> {
@@ -158,6 +186,16 @@ export class GitHubForge implements Forge {
             per_page: 100,
         });
         return data.map((c) => this.mapComment(c, prNumber));
+    }
+
+    async getPRReviewComments(prNumber: number): Promise<ReviewComment[]> {
+        const { data } = await this.octokit.pulls.listReviewComments({
+            owner: this.owner,
+            repo: this.repo,
+            pull_number: prNumber,
+            per_page: 100,
+        });
+        return data.map((c) => this.mapReviewComment(c, prNumber));
     }
 
     async getPRFiles(prNumber: number): Promise<FileChange[]> {
@@ -540,6 +578,25 @@ export class GitHubForge implements Forge {
             createdAt: new Date(data.created_at),
             updatedAt: new Date(data.updated_at),
             issueNumber,
+        };
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    private mapReviewComment(data: any, prNumber: number): ReviewComment {
+        return {
+            id: data.id.toString(),
+            body: data.body || '',
+            author: data.user?.login || 'unknown',
+            authorAssociation: data.author_association || 'NONE',
+            url: data.html_url,
+            createdAt: new Date(data.created_at),
+            updatedAt: new Date(data.updated_at),
+            prNumber,
+            path: data.path || '',
+            line: data.line ?? data.original_line ?? null,
+            side: data.side === 'LEFT' ? 'LEFT' : 'RIGHT',
+            diffHunk: data.diff_hunk || '',
+            inReplyToId: data.in_reply_to_id?.toString(),
         };
     }
 

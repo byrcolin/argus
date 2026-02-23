@@ -16,7 +16,7 @@
  */
 
 import { createHash } from 'crypto';
-import type { Forge, Issue, RepoKey } from '../forge/types';
+import type { Forge, Issue, RepoKey, ReviewComment } from '../forge/types';
 import {
     TrackedIssue,
     IssueState,
@@ -285,6 +285,9 @@ export class Pipeline {
                 // ── Step 6: Monitor comments on the issue ──
                 await this.processNewIssueComments(forge, issue);
 
+                // ── Step 6b: Monitor PR review comments (e.g., from Copilot, reviewers) ──
+                await this.processNewPRComments(forge, issue);
+
                 // ── Step 7: Analyze competing PRs ──
                 issue.state = 'analyzing-competing';
                 const competing = await this.prAnalyzer.analyzeCompetingPRs(forge, issue);
@@ -549,5 +552,126 @@ ${commentSummary}
         } catch (err) {
             this.logger.error(`Failed processing comments for issue #${issue.issueNumber}: ${err}`);
         }
+    }
+
+    /**
+     * Check for review comments on the PR (inline code review feedback).
+     * This catches feedback from GitHub Copilot, human reviewers, and other
+     * automated tools that post review comments on the PR's diff.
+     *
+     * For each batch of new review comments, Argus:
+     *  1. Filters out its own stamped comments
+     *  2. Groups comments by file for readability
+     *  3. Runs moderation on each comment
+     *  4. Posts a stamped summary acknowledging the feedback
+     */
+    private async processNewPRComments(
+        forge: Forge,
+        issue: TrackedIssue,
+    ): Promise<void> {
+        if (!issue.prNumber) { return; }
+
+        try {
+            // Fetch both regular PR conversation comments and inline review comments
+            const [conversationComments, reviewComments] = await Promise.all([
+                forge.getPRComments(issue.prNumber),
+                forge.getPRReviewComments(issue.prNumber),
+            ]);
+
+            // Filter out Argus's own comments (stamped)
+            const externalConversation = conversationComments.filter(
+                (c) => !this.stampManager.hasStamp(c.body),
+            );
+            const externalReviews = reviewComments.filter(
+                (rc) => !this.stampManager.hasStamp(rc.body),
+            );
+
+            if (externalConversation.length === 0 && externalReviews.length === 0) {
+                this.logger.debug(`No external comments on PR #${issue.prNumber}`);
+                return;
+            }
+
+            this.logger.info(
+                `Found ${externalConversation.length} conversation + ${externalReviews.length} review comment(s) on PR #${issue.prNumber}`,
+            );
+
+            // Run moderation on conversation comments (they fit the Comment interface)
+            if (externalConversation.length > 0) {
+                const actions = await this.commentHandler.processComments(
+                    forge, issue, externalConversation,
+                );
+                for (const action of actions) {
+                    if (action.threatClassification !== 'clean') {
+                        this.addActivity(
+                            issue.repo, issue.issueNumber, issue.prNumber,
+                            '🛡️', `PR comment by @${action.author}: ${action.threatClassification}`,
+                        );
+                    }
+                }
+            }
+
+            // Build a summary of review comments grouped by file
+            const reviewsByFile = this.groupReviewsByFile(externalReviews);
+
+            // Build response
+            const sections: string[] = [];
+
+            if (externalConversation.length > 0) {
+                const convSnippets = externalConversation
+                    .map((c) => `- **@${c.author}**: ${c.body.substring(0, 300)}${c.body.length > 300 ? '…' : ''}`)
+                    .join('\n');
+                sections.push(`### Conversation Comments\n\n${convSnippets}`);
+            }
+
+            if (externalReviews.length > 0) {
+                const fileGroups: string[] = [];
+                for (const [filePath, comments] of reviewsByFile.entries()) {
+                    const items = comments
+                        .map((rc) => {
+                            const lineRef = rc.line ? `L${rc.line}` : 'file-level';
+                            return `  - **@${rc.author}** (${lineRef}): ${rc.body.substring(0, 250)}${rc.body.length > 250 ? '…' : ''}`;
+                        })
+                        .join('\n');
+                    fileGroups.push(`- \`${filePath}\`\n${items}`);
+                }
+                sections.push(`### Code Review Comments\n\n${fileGroups.join('\n')}`);
+            }
+
+            const content = `## 👀 PR Feedback Acknowledged
+
+${externalConversation.length + externalReviews.length} comment(s) received on this PR from external reviewers.
+
+${sections.join('\n\n')}
+
+> Argus has logged this feedback. If changes are needed, a human should update the branch or request a new iteration.
+> Argus **never** force-pushes or auto-resolves review comments.`;
+
+            const { stamped } = this.stampManager.stampContent(content);
+            await forge.addPRComment(issue.prNumber, stamped);
+            this.addActivity(
+                issue.repo, issue.issueNumber, issue.prNumber,
+                '👀', `Acknowledged ${externalReviews.length} review + ${externalConversation.length} conversation comment(s) on PR`,
+            );
+
+        } catch (err) {
+            this.logger.error(`Failed processing PR comments for PR #${issue.prNumber}: ${err}`);
+        }
+    }
+
+    /**
+     * Group review comments by file path for structured display.
+     */
+    private groupReviewsByFile(reviews: ReviewComment[]): Map<string, ReviewComment[]> {
+        const grouped = new Map<string, ReviewComment[]>();
+        for (const rc of reviews) {
+            const key = rc.path || '(unknown file)';
+            if (!grouped.has(key)) { grouped.set(key, []); }
+            grouped.get(key)!.push(rc);
+        }
+        // Sort comments within each file by line number
+        for (const [, comments] of grouped) {
+            comments.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+        }
+        return grouped;
     }
 }
