@@ -30,6 +30,7 @@ import { Transcriber } from './transcriber';
 import { CommentHandler } from './comment-handler';
 import { EditDetector } from './edit-detector';
 import { PRAnalyzer } from './pr-analyzer';
+import { LoopDetector, ChainAnalysis } from './loop-detector';
 import type { StampManager } from '../crypto/stamp';
 import type { AuditLog } from '../crypto/audit';
 import type { Logger } from '../util/logger';
@@ -52,6 +53,60 @@ const DEFAULT_CONFIG: PipelineConfig = {
     dryRun: false,
 };
 
+// ─── Bot Detection ──────────────────────────────────────────────
+
+/**
+ * Patterns that match bot *conversation* comments that are pure noise.
+ * These are messages like "I've opened a new pull request #13" posted by
+ * copilot-swe-agent — they don't contain substantive feedback and should
+ * not trigger Argus to post another acknowledgment.
+ *
+ * Inline code-review comments from bots (e.g., copilot-pull-request-reviewer)
+ * are NOT filtered — those contain valuable technical feedback that Argus
+ * should evaluate.
+ */
+const BOT_NOISE_PATTERNS: RegExp[] = [
+    /I've opened a new pull request/i,
+    /I'll request review from you/i,
+    /I was blocked by some firewall rules/i,
+    /Once the pull request is ready/i,
+];
+
+/**
+ * Returns true if a conversation comment is bot-generated noise
+ * that should NOT trigger another Argus acknowledgment.
+ *
+ * This is intentionally narrow: only messages matching known noise patterns
+ * from [bot] accounts are filtered. Any substantive comment — even from a
+ * bot — passes through so Argus can evaluate it.
+ */
+function isBotNoise(author: string, body: string): boolean {
+    // Only apply noise filter to bot accounts
+    if (!author.toLowerCase().endsWith('[bot]')) {
+        return false;
+    }
+    // Check if the message matches any known noise pattern
+    return BOT_NOISE_PATTERNS.some((pattern) => pattern.test(body));
+}
+
+// ─── Rate Limiting ──────────────────────────────────────────────
+
+interface AckRecord {
+    count: number;
+    firstAckAt: Date;
+    lastAckAt: Date;
+}
+
+/**
+ * Max acknowledgments per PR before Argus backs off.
+ * This allows 2–3 rounds of productive back-and-forth with Copilot
+ * or human reviewers, then stops to prevent runaway loops.
+ */
+const MAX_ACKS_PER_PR = 3;
+
+/** Window in which MAX_ACKS_PER_PR applies (ms). Reset after this. */
+const ACK_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
+
 export class Pipeline {
     private workQueue: TrackedIssue[] = [];
     private activity: ActivityEntry[] = [];
@@ -60,6 +115,15 @@ export class Pipeline {
 
     // Track last poll time per repo
     private lastPollTimes = new Map<RepoKey, Date>();
+
+    /** Tracks how many times we've acknowledged each PR to prevent loops. */
+    private ackTracker = new Map<string, AckRecord>();
+
+    /** PRs where Argus has already posted a loop-detected comment. */
+    private loopDisengaged = new Set<string>();
+
+    /** Chain-tracing loop detector shared across poll cycles. */
+    private loopDetector: LoopDetector;
 
     constructor(
         private readonly evaluator: Evaluator,
@@ -75,6 +139,7 @@ export class Pipeline {
         config?: Partial<PipelineConfig>,
     ) {
         this.config = { ...DEFAULT_CONFIG, ...config };
+        this.loopDetector = new LoopDetector(stampManager, logger);
     }
 
     // ─── Public API ─────────────────────────────────────────────────
@@ -559,15 +624,17 @@ ${commentSummary}
      * This catches feedback from GitHub Copilot, human reviewers, and other
      * automated tools that post review comments on the PR's diff.
      *
-     * For each batch of new review comments, Argus:
-     *  1. Filters out its own stamped comments
-     *  2. Groups comments by file for readability
-     *  3. Runs moderation on each comment
-     *  4. Posts a stamped summary acknowledging the feedback
+     * Anti-loop design:
+     *  - Only includes comments NEWER than `sinceDate` (last Argus stamp)
+     *  - Bot conversation comments are already filtered by the caller
+     *  - The acknowledgment includes an HTML directive `<!-- argus:ack -->`
+     *    that signals to other bots not to treat this as an action request
+     *  - Wording is purely informational — no language suggesting action
      */
     private async processNewPRComments(
         forge: Forge,
         issue: TrackedIssue,
+        sinceDate?: Date | null,
     ): Promise<void> {
         if (!issue.prNumber) { return; }
 
@@ -578,21 +645,27 @@ ${commentSummary}
                 forge.getPRReviewComments(issue.prNumber),
             ]);
 
-            // Filter out Argus's own comments (stamped)
-            const externalConversation = conversationComments.filter(
-                (c) => !this.stampManager.hasStamp(c.body),
+            // Filter out Argus's own comments (stamped) and bot conversation noise
+            let externalConversation = conversationComments.filter(
+                (c) => !this.stampManager.hasStamp(c.body) && !isBotNoise(c.author, c.body),
             );
-            const externalReviews = reviewComments.filter(
+            let externalReviews = reviewComments.filter(
                 (rc) => !this.stampManager.hasStamp(rc.body),
             );
 
+            // Only include comments NEWER than our last acknowledgment
+            if (sinceDate) {
+                externalConversation = externalConversation.filter((c) => c.createdAt > sinceDate);
+                externalReviews = externalReviews.filter((rc) => rc.createdAt > sinceDate);
+            }
+
             if (externalConversation.length === 0 && externalReviews.length === 0) {
-                this.logger.debug(`No external comments on PR #${issue.prNumber}`);
+                this.logger.debug(`No new external comments on PR #${issue.prNumber}`);
                 return;
             }
 
             this.logger.info(
-                `Found ${externalConversation.length} conversation + ${externalReviews.length} review comment(s) on PR #${issue.prNumber}`,
+                `Found ${externalConversation.length} conversation + ${externalReviews.length} review comment(s) on PR #${issue.prNumber} (new since ${sinceDate?.toISOString() ?? 'start'})`,
             );
 
             // Run moderation on conversation comments (they fit the Comment interface)
@@ -637,20 +710,22 @@ ${commentSummary}
                 sections.push(`### Code Review Comments\n\n${fileGroups.join('\n')}`);
             }
 
-            const content = `## 👀 PR Feedback Acknowledged
+            // Anti-loop: HTML directive tells bots this is informational only.
+            const content = `<!-- argus:ack — this is an automated log entry, not an action request -->
+## 📋 Feedback Noted
 
-${externalConversation.length + externalReviews.length} comment(s) received on this PR from external reviewers.
+${externalConversation.length + externalReviews.length} new comment(s) since last check.
 
 ${sections.join('\n\n')}
 
-> Argus has logged this feedback. If changes are needed, a human should update the branch or request a new iteration.
-> Argus **never** force-pushes or auto-resolves review comments.`;
+> Argus has recorded this feedback for the maintainer to review.
+> No automated action will be taken — a human decides whether changes are needed.`;
 
             const { stamped } = this.stampManager.stampContent(content);
             await forge.addPRComment(issue.prNumber, stamped);
             this.addActivity(
                 issue.repo, issue.issueNumber, issue.prNumber,
-                '👀', `Acknowledged ${externalReviews.length} review + ${externalConversation.length} conversation comment(s) on PR`,
+                '👀', `Logged ${externalReviews.length} review + ${externalConversation.length} conversation comment(s) on PR`,
             );
 
         } catch (err) {
@@ -681,11 +756,10 @@ ${sections.join('\n\n')}
      * comments from GitHub Copilot, human reviewers, and other automated
      * tools on ANY open PR, not just ones tied to a specific issue.
      *
-     * For each PR with new external comments:
-     *  1. Fetches conversation + inline review comments
-     *  2. Filters out Argus's own stamped comments
-     *  3. Checks if Argus already posted an acknowledgment newer than all external comments
-     *  4. If not, runs moderation and posts a stamped summary
+     * Before checking each PR, the LoopDetector traces the full chain
+     * of related PRs.  If a chain has grown beyond the allowed depth
+     * or the same feedback is cycling, Argus posts a final "loop detected"
+     * comment and disengages.
      *
      * Returns the number of PRs that received new acknowledgments.
      */
@@ -699,7 +773,47 @@ ${sections.join('\n\n')}
 
             for (const pr of openPRs) {
                 try {
-                    const responded = await this.checkOnePRForComments(forge, pr.number, repoKey);
+                    // ── Chain analysis ──
+                    const loopKey = `${repoKey}:${pr.number}`;
+
+                    // Already disengaged from this PR chain
+                    if (this.loopDisengaged.has(loopKey)) {
+                        this.logger.debug(`PR #${pr.number}: loop previously detected — skipping`);
+                        continue;
+                    }
+
+                    const analysis = await this.loopDetector.analyze(
+                        forge, pr.number, openPRs,
+                    );
+
+                    if (!analysis.shouldEngage) {
+                        // Post a one-time loop-detected comment
+                        const loopComment = this.loopDetector.generateLoopComment(analysis);
+                        const { stamped } = this.stampManager.stampContent(loopComment);
+                        await forge.addPRComment(pr.number, stamped);
+
+                        this.loopDisengaged.add(loopKey);
+                        this.addActivity(
+                            repoKey, undefined, pr.number,
+                            '🔄', `Loop detected on PR #${pr.number} — chain: ${analysis.chain.map((n) => `#${n}`).join(' → ')}`,
+                        );
+                        this.logger.warn(
+                            `Disengaging from PR #${pr.number}: ${analysis.reason}`,
+                        );
+                        continue;
+                    }
+
+                    // Log chain info when depth > 0
+                    if (analysis.depth > 0) {
+                        this.logger.info(
+                            `PR #${pr.number}: chain depth ${analysis.depth}/3 ` +
+                            `(${analysis.chain.map((n) => `#${n}`).join(' → ')})`,
+                        );
+                    }
+
+                    const responded = await this.checkOnePRForComments(
+                        forge, pr.number, repoKey, analysis,
+                    );
                     if (responded) { acknowledged++; }
                 } catch (err) {
                     this.logger.error(`Error checking PR #${pr.number}: ${err}`);
@@ -719,12 +833,37 @@ ${sections.join('\n\n')}
     /**
      * Check a single PR for unacknowledged external comments.
      * Returns true if Argus posted a new acknowledgment.
+     *
+     * Anti-loop protections:
+     *  - Chain analysis (via LoopDetector) has already approved engagement.
+     *  - Bot noise comments ("I've opened PR #X") are filtered out.
+     *  - Inline code-review comments from bots are kept — those ARE useful.
+     *  - Only comments NEWER than Argus's last stamp are considered.
+     *  - Rate-limited to MAX_ACKS_PER_PR per ACK_WINDOW_MS as a safety net.
      */
     private async checkOnePRForComments(
         forge: Forge,
         prNumber: number,
         repo: RepoKey,
+        chainAnalysis: ChainAnalysis,
     ): Promise<boolean> {
+        // ── Rate limit check ──
+        const ackKey = `${repo}:${prNumber}`;
+        const ackRecord = this.ackTracker.get(ackKey);
+        if (ackRecord) {
+            const elapsed = Date.now() - ackRecord.firstAckAt.getTime();
+            if (elapsed < ACK_WINDOW_MS && ackRecord.count >= MAX_ACKS_PER_PR) {
+                this.logger.debug(
+                    `PR #${prNumber}: rate-limited (${ackRecord.count} acks in ${Math.round(elapsed / 60_000)}m) — skipping`,
+                );
+                return false;
+            }
+            // Reset window if expired
+            if (elapsed >= ACK_WINDOW_MS) {
+                this.ackTracker.delete(ackKey);
+            }
+        }
+
         const [conversationComments, reviewComments] = await Promise.all([
             forge.getPRComments(prNumber),
             forge.getPRReviewComments(prNumber),
@@ -734,9 +873,12 @@ ${sections.join('\n\n')}
         const stampedComments = conversationComments.filter(
             (c) => this.stampManager.hasStamp(c.body),
         );
+
+        // Filter external conversation: exclude bot noise (e.g. "I opened PR #X")
         const externalConversation = conversationComments.filter(
-            (c) => !this.stampManager.hasStamp(c.body),
+            (c) => !this.stampManager.hasStamp(c.body) && !isBotNoise(c.author, c.body),
         );
+        // Inline review comments from bots (copilot reviewer) are kept
         const externalReviews = reviewComments.filter(
             (rc) => !this.stampManager.hasStamp(rc.body),
         );
@@ -745,21 +887,19 @@ ${sections.join('\n\n')}
             return false;
         }
 
-        // Check if Argus already acknowledged all current external comments
-        // by comparing the latest stamped comment date to the latest external date
+        // Find the timestamp of Argus's latest stamped comment
+        let sinceDate: Date | null = null;
         if (stampedComments.length > 0) {
             const latestStamped = stampedComments.reduce((a, b) =>
                 a.createdAt > b.createdAt ? a : b,
             );
-            const allExternalDates = [
-                ...externalConversation.map((c) => c.createdAt),
-                ...externalReviews.map((rc) => rc.createdAt),
-            ];
-            const latestExternal = allExternalDates.reduce(
-                (a, b) => (a > b ? a : b), new Date(0),
-            );
+            sinceDate = latestStamped.createdAt;
 
-            if (latestStamped.createdAt > latestExternal) {
+            // Only consider comments NEWER than our last stamp
+            const newConv = externalConversation.filter((c) => c.createdAt > sinceDate!);
+            const newReviews = externalReviews.filter((rc) => rc.createdAt > sinceDate!);
+
+            if (newConv.length === 0 && newReviews.length === 0) {
                 this.logger.debug(
                     `PR #${prNumber}: all comments already acknowledged`,
                 );
@@ -767,9 +907,9 @@ ${sections.join('\n\n')}
             }
         }
 
-        // There are new unacknowledged comments — respond
+        // There are genuinely new, human-authored comments — respond
         this.logger.info(
-            `PR #${prNumber}: ${externalConversation.length} conversation + ${externalReviews.length} review comment(s) unacknowledged — responding`,
+            `PR #${prNumber}: new unacknowledged feedback detected — responding`,
         );
 
         // Build a stub TrackedIssue to reuse processNewPRComments
@@ -786,7 +926,21 @@ ${sections.join('\n\n')}
             prNumber,
         };
 
-        await this.processNewPRComments(forge, stub);
+        await this.processNewPRComments(forge, stub, sinceDate);
+
+        // ── Track acknowledgment for rate limiting ──
+        const existing = this.ackTracker.get(ackKey);
+        if (existing) {
+            existing.count++;
+            existing.lastAckAt = new Date();
+        } else {
+            this.ackTracker.set(ackKey, {
+                count: 1,
+                firstAckAt: new Date(),
+                lastAckAt: new Date(),
+            });
+        }
+
         this.addActivity(
             repo, undefined, prNumber,
             '👀', `Responded to new comments on PR #${prNumber}`,
