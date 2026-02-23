@@ -514,6 +514,9 @@ export class GitLabForge implements Forge {
         if (data.state === 'merged') { state = 'merged'; }
         else if (data.state === 'closed') { state = 'closed'; }
 
+        // GitLab uses work_in_progress (older) or draft (newer API) for draft MRs
+        const isDraft = !!(data.draft ?? data.work_in_progress);
+
         return {
             id: data.id.toString(),
             number: data.iid,
@@ -522,6 +525,7 @@ export class GitLabForge implements Forge {
             author: data.author?.username || 'unknown',
             authorAssociation: 'NONE',
             state,
+            draft: isDraft,
             head: data.source_branch || '',
             base: data.target_branch || '',
             url: data.web_url,

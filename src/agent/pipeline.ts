@@ -16,7 +16,7 @@
  */
 
 import { createHash } from 'crypto';
-import type { Forge, Issue, RepoKey, ReviewComment } from '../forge/types';
+import type { Forge, Issue, PullRequest, RepoKey, ReviewComment } from '../forge/types';
 import {
     TrackedIssue,
     IssueState,
@@ -414,6 +414,33 @@ export class Pipeline {
         );
     }
 
+    /**
+     * Detect work-in-progress PRs that should not be engaged yet.
+     *
+     * Checks:
+     *  1. GitHub/GitLab "draft" flag (mapped from the API).
+     *  2. Title prefixes: `[WIP]`, `WIP:`, `Draft:`, `[Draft]`.
+     *  3. Construction emoji 🚧 in title.
+     */
+    private isWorkInProgress(pr: PullRequest): boolean {
+        if (pr.draft) { return true; }
+
+        const title = pr.title.trim();
+        const upper = title.toUpperCase();
+        if (
+            upper.startsWith('[WIP]') ||
+            upper.startsWith('WIP:') ||
+            upper.startsWith('WIP ') ||
+            upper.startsWith('DRAFT:') ||
+            upper.startsWith('[DRAFT]') ||
+            title.includes('🚧')
+        ) {
+            return true;
+        }
+
+        return false;
+    }
+
     private addActivity(
         repo: RepoKey,
         issueNumber: number | undefined,
@@ -773,6 +800,14 @@ ${sections.join('\n\n')}
 
             for (const pr of openPRs) {
                 try {
+                    // ── Skip work-in-progress PRs ──
+                    if (this.isWorkInProgress(pr)) {
+                        this.logger.debug(
+                            `PR #${pr.number}: work in progress — skipping`,
+                        );
+                        continue;
+                    }
+
                     // ── Chain analysis ──
                     const loopKey = `${repoKey}:${pr.number}`;
 

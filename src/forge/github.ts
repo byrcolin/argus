@@ -624,6 +624,7 @@ export class GitHubForge implements Forge {
             author: data.user?.login || 'unknown',
             authorAssociation: data.author_association || 'NONE',
             state,
+            draft: !!data.draft,
             head: data.head?.ref || '',
             base: data.base?.ref || '',
             url: data.html_url,

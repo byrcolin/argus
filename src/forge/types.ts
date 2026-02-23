@@ -82,6 +82,8 @@ export interface PullRequest {
     author: string;
     authorAssociation: string;
     state: 'open' | 'closed' | 'merged';
+    /** True when the PR/MR is a draft or has a WIP title prefix. */
+    draft: boolean;
     head: string;        // Branch name
     base: string;        // Target branch
     url: string;
