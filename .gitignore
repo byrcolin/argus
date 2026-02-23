@@ -1,0 +1,29 @@
+# Build output
+out/
+dist/
+
+# Dependencies
+node_modules/
+
+# Test runner
+.vscode-test/
+
+# Packaged extension
+*.vsix
+
+# Source maps
+*.js.map
+
+# TypeScript incremental
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+.env.*
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log

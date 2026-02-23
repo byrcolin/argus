@@ -1,0 +1,548 @@
+{
+  "name": "argus-issue-agent",
+  "displayName": "Argus — AI Issue Agent",
+  "description": "Autonomous AI agent that triages issues, investigates code, creates branches, and opens pull requests with full reasoning transcripts. Multi-forge (GitHub + GitLab), adversary-aware, cryptographically stamped.",
+  "version": "0.1.0",
+  "publisher": "byrcolin",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other",
+    "SCM Providers"
+  ],
+  "keywords": [
+    "github",
+    "gitlab",
+    "issues",
+    "pull-requests",
+    "ai",
+    "triage",
+    "automation",
+    "security"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/byrcolin/argus"
+  },
+  "icon": "media/argus-icon.png",
+  "activationEvents": [
+    "onView:argus.workQueue",
+    "onView:argus.recentActivity",
+    "onView:argus.repoStats",
+    "onView:argus.security",
+    "onView:argus.systemHealth"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "argus",
+          "title": "Argus",
+          "icon": "media/argus-eye.svg"
+        }
+      ]
+    },
+    "views": {
+      "argus": [
+        {
+          "id": "argus.workQueue",
+          "name": "Work Queue"
+        },
+        {
+          "id": "argus.recentActivity",
+          "name": "Recent Activity"
+        },
+        {
+          "id": "argus.repoStats",
+          "name": "Repository Stats"
+        },
+        {
+          "id": "argus.security",
+          "name": "Security Monitor"
+        },
+        {
+          "id": "argus.systemHealth",
+          "name": "System Health"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "argus.workQueue",
+        "contents": "No issues in queue.\n\n[$(add) Add Repository](command:argus.addRepo)\n\n[$(play) Start Argus](command:argus.start)\n[$(sync) Poll Now](command:argus.pollNow)",
+        "when": "!argus.isRunning"
+      },
+      {
+        "view": "argus.workQueue",
+        "contents": "Polling for issues...\nNo items in queue yet.",
+        "when": "argus.isRunning"
+      },
+      {
+        "view": "argus.recentActivity",
+        "contents": "No activity yet. Start Argus to begin processing issues."
+      },
+      {
+        "view": "argus.repoStats",
+        "contents": "No repositories configured.\n\n[$(add) Add Repository](command:argus.addRepo)"
+      },
+      {
+        "view": "argus.security",
+        "contents": "No security events recorded.\n[Verify Audit Log](command:argus.verifyAuditLog)"
+      },
+      {
+        "view": "argus.systemHealth",
+        "contents": "System health will appear after activation."
+      }
+    ],
+    "commands": [
+      {
+        "command": "argus.start",
+        "title": "Argus: Start",
+        "icon": "$(play)"
+      },
+      {
+        "command": "argus.stop",
+        "title": "Argus: Stop",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "argus.emergencyStop",
+        "title": "Argus: Emergency Stop",
+        "icon": "$(error)"
+      },
+      {
+        "command": "argus.pollNow",
+        "title": "Argus: Poll Now",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "argus.processIssue",
+        "title": "Argus: Process Issue"
+      },
+      {
+        "command": "argus.showActivityLog",
+        "title": "Argus: Show Activity Log"
+      },
+      {
+        "command": "argus.showSecurityLog",
+        "title": "Argus: Show Security Log"
+      },
+      {
+        "command": "argus.configureRepos",
+        "title": "Argus: Configure Repos"
+      },
+      {
+        "command": "argus.clearQueue",
+        "title": "Argus: Clear Queue"
+      },
+      {
+        "command": "argus.resetTrustData",
+        "title": "Argus: Reset Trust Data"
+      },
+      {
+        "command": "argus.exportReport",
+        "title": "Argus: Export Report"
+      },
+      {
+        "command": "argus.verifyAuditLog",
+        "title": "Argus: Verify Audit Log"
+      },
+      {
+        "command": "argus.rotateKey",
+        "title": "Argus: Rotate Instance Key"
+      },
+      {
+        "command": "argus.skipIssue",
+        "title": "Skip This Issue",
+        "icon": "$(close)"
+      },
+      {
+        "command": "argus.reprocessIssue",
+        "title": "Reprocess Issue",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "argus.promoteIssue",
+        "title": "Promote to Front of Queue",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "argus.openInBrowser",
+        "title": "Open in Browser",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "argus.viewTranscript",
+        "title": "View AI Transcript",
+        "icon": "$(output)"
+      },
+      {
+        "command": "argus.addRepo",
+        "title": "Argus: Add Repository",
+        "icon": "$(add)"
+      },
+      {
+        "command": "argus.removeRepo",
+        "title": "Argus: Remove Repository",
+        "icon": "$(trash)"
+      }
+    ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "argus.openInBrowser",
+          "when": "view =~ /^argus\\./ && viewItem =~ /hasUrl/",
+          "group": "navigation"
+        },
+        {
+          "command": "argus.skipIssue",
+          "when": "view == argus.workQueue && viewItem =~ /issue/",
+          "group": "inline"
+        },
+        {
+          "command": "argus.reprocessIssue",
+          "when": "view == argus.workQueue && viewItem =~ /issue/",
+          "group": "actions"
+        },
+        {
+          "command": "argus.promoteIssue",
+          "when": "view == argus.workQueue && viewItem =~ /pending/",
+          "group": "actions"
+        },
+        {
+          "command": "argus.viewTranscript",
+          "when": "view == argus.workQueue && viewItem =~ /issue/",
+          "group": "actions"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "argus.addRepo",
+          "when": "view == argus.workQueue",
+          "group": "navigation"
+        },
+        {
+          "command": "argus.start",
+          "when": "view == argus.workQueue && !argus.isRunning",
+          "group": "navigation"
+        },
+        {
+          "command": "argus.stop",
+          "when": "view == argus.workQueue && argus.isRunning",
+          "group": "navigation"
+        },
+        {
+          "command": "argus.pollNow",
+          "when": "view == argus.workQueue",
+          "group": "navigation"
+        },
+        {
+          "command": "argus.removeRepo",
+          "when": "view == argus.repoStats",
+          "group": "navigation"
+        },
+        {
+          "command": "argus.addRepo",
+          "when": "view == argus.repoStats",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Argus — AI Issue Agent",
+      "properties": {
+        "argus.repos": {
+          "type": "array",
+          "default": [],
+          "description": "Repositories to monitor. Paste URLs (https://github.com/owner/repo.git), SSH URLs, or shorthand (owner/repo).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "argus.branchPrefix": {
+          "type": "string",
+          "default": "ai-fix/",
+          "description": "Prefix for branches created by Argus."
+        },
+        "argus.synthesisBranchPrefix": {
+          "type": "string",
+          "default": "ai-synthesis/",
+          "description": "Prefix for synthesis branches."
+        },
+        "argus.maxIterations": {
+          "type": "number",
+          "default": 5,
+          "description": "Maximum coding iterations per issue before giving up."
+        },
+        "argus.maxDiffLines": {
+          "type": "number",
+          "default": 500,
+          "description": "Maximum lines added in a single iteration. Exceeded → pause."
+        },
+        "argus.maxConcurrentIssues": {
+          "type": "number",
+          "default": 1,
+          "description": "How many issues to process simultaneously."
+        },
+        "argus.dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log all actions without executing them."
+        },
+        "argus.autoStartOnActivation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start polling automatically when VS Code opens."
+        },
+        "argus.labels.approved": {
+          "type": "string",
+          "default": "ai-triaged",
+          "description": "Label applied to approved issues."
+        },
+        "argus.labels.rejected": {
+          "type": "string",
+          "default": "ai-rejected",
+          "description": "Label applied to rejected issues."
+        },
+        "argus.labels.needsReview": {
+          "type": "string",
+          "default": "needs-human-review",
+          "description": "Label applied when AI confidence is low."
+        },
+        "argus.labels.subversionDetected": {
+          "type": "string",
+          "default": "subversion-detected",
+          "description": "Label applied when prompt injection or manipulation is detected."
+        },
+        "argus.trust.trustedUsers": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" },
+          "description": "Usernames immune from blocking/reporting (owner tier)."
+        },
+        "argus.trust.treatMaintainersAsTrusted": {
+          "type": "boolean",
+          "default": true,
+          "description": "Maintainers get reduced suspicion (flag only, never block/report)."
+        },
+        "argus.trust.treatReviewersAsTrusted": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reviewers get reduced suspicion."
+        },
+        "argus.trust.newAccountSuspicionDays": {
+          "type": "number",
+          "default": 30,
+          "description": "Accounts younger than this get extra suspicion."
+        },
+        "argus.trust.historyWeight": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Multiplier for history-based trust modifier."
+        },
+        "argus.security.threatThreshold": {
+          "type": "number",
+          "default": 0.5,
+          "description": "Minimum threat confidence to flag content."
+        },
+        "argus.security.blockThreshold": {
+          "type": "number",
+          "default": 0.8,
+          "description": "Minimum threat confidence to block a user."
+        },
+        "argus.security.reportOnBlock": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also report to the platform when blocking a user."
+        },
+        "argus.security.deleteHostileComments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Delete comments classified as hostile (vs. just ignoring)."
+        },
+        "argus.security.reEvaluateOnEdit": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-triage issues when their body is edited after approval."
+        },
+        "argus.security.maxInputLength": {
+          "type": "number",
+          "default": 4000,
+          "description": "Maximum characters of untrusted input sent to LLM."
+        },
+        "argus.comments.processIssueComments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Evaluate comments on issues."
+        },
+        "argus.comments.processPRComments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Evaluate comments on pull requests."
+        },
+        "argus.comments.processPRReviews": {
+          "type": "boolean",
+          "default": true,
+          "description": "Evaluate PR review comments."
+        },
+        "argus.prAnalysis.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Evaluate competing PRs for the same issue."
+        },
+        "argus.prAnalysis.synthesisEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Create synthesis (super) PRs from multiple competing PRs."
+        },
+        "argus.prAnalysis.weights": {
+          "type": "object",
+          "default": {
+            "correctness": 0.30,
+            "completeness": 0.20,
+            "codeQuality": 0.15,
+            "testCoverage": 0.15,
+            "minimalInvasiveness": 0.10,
+            "ciPassing": 0.10
+          },
+          "description": "Weights for PR scoring dimensions."
+        },
+        "argus.rateLimits.commentsPerHour": {
+          "type": "number",
+          "default": 30,
+          "description": "Maximum comments posted per hour across all repos."
+        },
+        "argus.rateLimits.branchesPerHour": {
+          "type": "number",
+          "default": 10,
+          "description": "Maximum branches created per hour."
+        },
+        "argus.rateLimits.prsPerHour": {
+          "type": "number",
+          "default": 5,
+          "description": "Maximum PRs opened per hour."
+        },
+        "argus.rateLimits.pushesPerHour": {
+          "type": "number",
+          "default": 20,
+          "description": "Maximum file pushes per hour."
+        },
+        "argus.rateLimits.blocksPerDay": {
+          "type": "number",
+          "default": 3,
+          "description": "Maximum users blocked per day."
+        },
+        "argus.rateLimits.llmCallsPerHour": {
+          "type": "number",
+          "default": 100,
+          "description": "Maximum Copilot LM calls per hour."
+        },
+        "argus.rateLimits.issuesPerHour": {
+          "type": "number",
+          "default": 10,
+          "description": "Maximum issues processed per hour per repo."
+        },
+        "argus.rateLimits.queueDepth": {
+          "type": "number",
+          "default": 50,
+          "description": "Maximum items in the queue before pausing."
+        },
+        "argus.watchdogTimeoutMinutes": {
+          "type": "number",
+          "default": 30,
+          "description": "Maximum minutes per issue before the watchdog aborts."
+        },
+        "argus.crypto.keyRotationDays": {
+          "type": "number",
+          "default": 90,
+          "description": "Days before suggesting key rotation."
+        },
+        "argus.crypto.nonceRetentionDays": {
+          "type": "number",
+          "default": 30,
+          "description": "Days to retain nonces in the anti-replay registry."
+        },
+        "argus.email.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable email notifications."
+        },
+        "argus.email.smtp": {
+          "type": "object",
+          "default": {},
+          "description": "SMTP configuration (host, port, secure, user). Password stored in SecretStorage.",
+          "properties": {
+            "host": { "type": "string" },
+            "port": { "type": "number", "default": 587 },
+            "secure": { "type": "boolean", "default": true },
+            "user": { "type": "string" }
+          }
+        },
+        "argus.email.defaultRecipients": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" },
+          "description": "Default email recipients."
+        },
+        "argus.email.events": {
+          "type": "object",
+          "default": {
+            "prOpened": { "enabled": true },
+            "prStuck": { "enabled": true },
+            "ciPassedFinal": { "enabled": true },
+            "threatDetected": { "enabled": true },
+            "userBlocked": { "enabled": true },
+            "emergencyStop": { "enabled": true },
+            "rateLimitWarning": { "enabled": true },
+            "anomalyDetected": { "enabled": true },
+            "systemError": { "enabled": true }
+          },
+          "description": "Per-event email configuration."
+        },
+        "argus.email.digestMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Batch emails into hourly digests."
+        },
+        "argus.email.quietHours": {
+          "type": "object",
+          "default": { "start": "23:00", "end": "07:00", "timezone": "UTC" },
+          "description": "Time range during which emails are queued.",
+          "properties": {
+            "start": { "type": "string" },
+            "end": { "type": "string" },
+            "timezone": { "type": "string" }
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "@octokit/rest": "^21.0.0",
+    "nodemailer": "^6.9.0"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.0",
+    "@types/node": "^20.0.0",
+    "@types/nodemailer": "^6.4.0",
+    "@types/vscode": "^1.95.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vscode/test-electron": "^2.4.0",
+    "@vscode/vsce": "^3.0.0",
+    "eslint": "^8.56.0",
+    "mocha": "^10.0.0",
+    "typescript": "^5.5.0"
+  }
+}
