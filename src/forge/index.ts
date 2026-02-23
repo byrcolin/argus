@@ -14,6 +14,7 @@ export type {
     RepoKey,
     RepoRole,
     UserHistory,
+    TreeEntry,
 } from './types';
 export { repoKey } from './types';
 export { GitHubForge } from './github';

@@ -21,6 +21,7 @@ import type {
     RepoRole,
     UserHistory,
     RepoKey,
+    TreeEntry,
 } from './types';
 import { repoKey } from './types';
 
@@ -230,6 +231,23 @@ export class GitLabForge implements Forge {
                 body: JSON.stringify(payload),
             });
         }
+    }
+
+    async listTree(branch: string, path: string = '', recursive: boolean = false): Promise<TreeEntry[]> {
+        const params = new URLSearchParams({
+            ref: branch,
+            per_page: '100',
+        });
+        if (path) { params.set('path', path); }
+        if (recursive) { params.set('recursive', 'true'); }
+
+        const data = await this.api<any[]>(
+            `/projects/${this.projectPath}/repository/tree?${params.toString()}`
+        );
+        return data.map((item) => ({
+            path: item.path,
+            type: item.type === 'tree' ? 'tree' as const : 'blob' as const,
+        }));
     }
 
     // ─── CI ─────────────────────────────────────────────────────────

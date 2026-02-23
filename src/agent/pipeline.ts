@@ -95,6 +95,12 @@ export class Pipeline {
                 continue;
             }
 
+            // Skip if Argus has the last word (no new comments since our last stamp)
+            if (await this.argusHasLastWord(forge, issue.number)) {
+                this.logger.info(`Skipping issue #${issue.number} — Argus has the last word`);
+                continue;
+            }
+
             const tracked: TrackedIssue = {
                 issueNumber: issue.number,
                 repo: repoKey,
@@ -184,9 +190,20 @@ export class Pipeline {
             });
 
             if (!evaluation.merit) {
-                issue.state = 'rejected';
-                this.addActivity(issue.repo, issue.issueNumber, undefined, '❌', `Rejected issue #${issue.issueNumber}: ${evaluation.reasoning.substring(0, 100)}`);
-                return issue;
+                // Safety net: low-confidence rejections get flipped to approved
+                if (evaluation.confidence < 0.7) {
+                    this.logger.warn(
+                        `Overriding low-confidence rejection for #${issue.issueNumber} ` +
+                        `(confidence: ${evaluation.confidence.toFixed(2)}) — accepting for investigation`,
+                    );
+                    evaluation.merit = true;
+                    evaluation.reasoning = `[Auto-accepted: low confidence rejection overridden] ${evaluation.reasoning}`;
+                    evaluation.suggestedLabels = [...(evaluation.suggestedLabels || []), 'argus:low-confidence-override'];
+                } else {
+                    issue.state = 'rejected';
+                    this.addActivity(issue.repo, issue.issueNumber, undefined, '❌', `Rejected issue #${issue.issueNumber}: ${evaluation.reasoning.substring(0, 100)}`);
+                    return issue;
+                }
             }
 
             issue.state = 'approved';
@@ -262,7 +279,13 @@ export class Pipeline {
 
                 this.addActivity(issue.repo, issue.issueNumber, pr.number, '📤', `Opened PR #${pr.number}`, pr.url);
 
-                // ── Step 6: Analyze competing PRs ──
+                // ── Step 5b: Post acknowledgment on the issue ──
+                await this.postIssueAcknowledgment(forge, issue, pr.number, pr.url, evaluation);
+
+                // ── Step 6: Monitor comments on the issue ──
+                await this.processNewIssueComments(forge, issue);
+
+                // ── Step 7: Analyze competing PRs ──
                 issue.state = 'analyzing-competing';
                 const competing = await this.prAnalyzer.analyzeCompetingPRs(forge, issue);
                 issue.competingPRs = competing;
@@ -353,9 +376,8 @@ export class Pipeline {
         iterations: any[],
     ): Promise<string> {
         const lastIteration = iterations[iterations.length - 1];
-        const stamp = await this.stampManager.stampContent('');
 
-        return `## Automated Fix for #${issue.issueNumber}
+        const content = `## Automated Fix for #${issue.issueNumber}
 
 ${evaluation.reasoning}
 
@@ -374,8 +396,158 @@ ${lastIteration?.ciResult === 'passing' ? '✅ Passing' : '⚠️ Not passing �
 > It should be reviewed by a human before merging.
 > **Argus never merges PRs.**
 >
-> See the comments below for full AI reasoning transcription.
+> See the comments below for full AI reasoning transcription.`;
 
-${stamp}`;
+        const { stamped } = this.stampManager.stampContent(content);
+        return stamped;
+    }
+
+    // ─── Issue Comment Management ───────────────────────────────────
+
+    /**
+     * Check if Argus has the "last word" on an issue.
+     * Returns true if the most recent comment has an Argus stamp — meaning
+     * nobody has replied since we last responded, so there's nothing new to do.
+     * Returns false if:
+     *  - There are no comments at all (new issue)
+     *  - The most recent comment is NOT from Argus (someone replied — re-engage)
+     *  - We can't read comments (fail open — process the issue)
+     */
+    private async argusHasLastWord(forge: Forge, issueNumber: number): Promise<boolean> {
+        try {
+            const comments = await forge.getIssueComments(issueNumber);
+            if (comments.length === 0) { return false; }
+
+            // Sort by creation date descending to find the most recent
+            const sorted = [...comments].sort(
+                (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+            );
+            const latest = sorted[0];
+
+            return this.stampManager.hasStamp(latest.body);
+        } catch (err) {
+            this.logger.debug(`Could not check last word for issue #${issueNumber}: ${err}`);
+            return false; // Fail open — process the issue if we can't check
+        }
+    }
+
+    /**
+     * Post a stamped acknowledgment comment on the original issue linking to the PR.
+     * This serves two purposes:
+     *  1. Tells the issue author that Argus is working on it
+     *  2. Marks the issue as processed (stamp prevents re-evaluation)
+     */
+    private async postIssueAcknowledgment(
+        forge: Forge,
+        issue: TrackedIssue,
+        prNumber: number,
+        prUrl: string,
+        evaluation: any,
+    ): Promise<void> {
+        const content = `## 🤖 Argus — Issue Acknowledged
+
+I've evaluated this issue and created a pull request with a proposed fix.
+
+| | |
+|---|---|
+| **Pull Request** | #${prNumber} |
+| **Category** | ${evaluation.category} |
+| **Severity** | ${evaluation.severity} |
+| **Confidence** | ${(evaluation.confidence * 100).toFixed(0)}% |
+
+### Proposed Approach
+${evaluation.proposedApproach}
+
+> Please review the PR for the full AI reasoning transcript and code changes.
+> Argus **never** merges PRs — a human must approve and merge.`;
+
+        const { stamped } = this.stampManager.stampContent(content);
+        await forge.addComment(issue.issueNumber, stamped);
+        this.logger.info(`Posted acknowledgment on issue #${issue.issueNumber} linking to PR #${prNumber}`);
+        this.addActivity(issue.repo, issue.issueNumber, prNumber, '💬', `Posted acknowledgment on issue #${issue.issueNumber}`);
+    }
+
+    /**
+     * Check for new comments on an issue that Argus hasn't responded to.
+     * Runs the comment handler for moderation, plus evaluates content comments
+     * for relevance (e.g., additional context, corrections, requests).
+     */
+    private async processNewIssueComments(
+        forge: Forge,
+        issue: TrackedIssue,
+    ): Promise<void> {
+        try {
+            const comments = await forge.getIssueComments(issue.issueNumber);
+
+            // Find comments that are NOT from Argus (no stamp) and came after
+            // the issue was first enqueued
+            const ourCommentDates = new Set<string>();
+            const newComments: typeof comments = [];
+
+            for (const comment of comments) {
+                if (this.stampManager.hasStamp(comment.body)) {
+                    ourCommentDates.add(comment.id);
+                    continue;
+                }
+                // Only look at comments posted after we started processing
+                if (issue.startedAt && comment.createdAt > issue.startedAt) {
+                    newComments.push(comment);
+                }
+            }
+
+            if (newComments.length === 0) {
+                this.logger.debug(`No new comments on issue #${issue.issueNumber}`);
+                return;
+            }
+
+            this.logger.info(
+                `Processing ${newComments.length} new comment(s) on issue #${issue.issueNumber}`,
+            );
+
+            // Run moderation/threat assessment on new comments
+            const actions = await this.commentHandler.processComments(
+                forge, issue, newComments,
+            );
+
+            // Log results
+            for (const action of actions) {
+                if (action.threatClassification !== 'clean') {
+                    this.addActivity(
+                        issue.repo, issue.issueNumber, issue.prNumber,
+                        '🛡️', `Comment by @${action.author}: ${action.threatClassification}`,
+                    );
+                }
+            }
+
+            // For clean comments that might contain useful feedback,
+            // post a stamped acknowledgment
+            const cleanComments = newComments.filter((c) => {
+                const action = actions.find((a) => a.commentId === c.id);
+                return action && action.threatClassification === 'clean';
+            });
+
+            if (cleanComments.length > 0 && issue.prNumber) {
+                const commentSummary = cleanComments
+                    .map((c) => `- @${c.author}: ${c.body.substring(0, 200)}`)
+                    .join('\n');
+
+                const content = `## 💬 New Comments Noted
+
+${cleanComments.length} new comment(s) received on issue #${issue.issueNumber} after PR creation:
+
+${commentSummary}
+
+> These comments have been logged. If they require code changes, please comment on this PR with specific instructions.`;
+
+                const { stamped } = this.stampManager.stampContent(content);
+                await forge.addPRComment(issue.prNumber, stamped);
+                this.addActivity(
+                    issue.repo, issue.issueNumber, issue.prNumber,
+                    '💬', `Noted ${cleanComments.length} new comment(s) on issue`,
+                );
+            }
+        } catch (err) {
+            this.logger.error(`Failed processing comments for issue #${issue.issueNumber}: ${err}`);
+        }
     }
 }

@@ -18,6 +18,7 @@ import type {
     RepoRole,
     UserHistory,
     RepoKey,
+    TreeEntry,
 } from './types';
 import { repoKey } from './types';
 
@@ -268,6 +269,57 @@ export class GitHubForge implements Forge {
             branch,
             sha,
         });
+    }
+
+    async listTree(branch: string, path: string = '', recursive: boolean = false): Promise<TreeEntry[]> {
+        if (recursive) {
+            // Use the Git Trees API with recursive flag for the full tree
+            const { data: refData } = await this.octokit.git.getRef({
+                owner: this.owner,
+                repo: this.repo,
+                ref: `heads/${branch}`,
+            });
+            const { data: commitData } = await this.octokit.git.getCommit({
+                owner: this.owner,
+                repo: this.repo,
+                commit_sha: refData.object.sha,
+            });
+            const { data: treeData } = await this.octokit.git.getTree({
+                owner: this.owner,
+                repo: this.repo,
+                tree_sha: commitData.tree.sha,
+                recursive: 'true',
+            });
+            let entries: TreeEntry[] = treeData.tree
+                .filter((e): e is typeof e & { type: string; path: string } => !!e.type && !!e.path)
+                .map((e) => ({
+                    path: e.path!,
+                    type: e.type === 'tree' ? 'tree' as const : 'blob' as const,
+                    size: e.size,
+                }));
+            // Filter to path prefix if specified
+            if (path) {
+                const prefix = path.endsWith('/') ? path : path + '/';
+                entries = entries.filter((e) => e.path.startsWith(prefix));
+            }
+            return entries;
+        }
+
+        // Non-recursive: use the Contents API to list a single directory
+        const { data } = await this.octokit.repos.getContent({
+            owner: this.owner,
+            repo: this.repo,
+            path: path || '',
+            ref: branch,
+        });
+        if (!Array.isArray(data)) {
+            return [{ path: path || '', type: 'blob', size: (data as any).size }];
+        }
+        return data.map((item) => ({
+            path: item.path,
+            type: item.type === 'dir' ? 'tree' as const : 'blob' as const,
+            size: item.size,
+        }));
     }
 
     // ─── CI ─────────────────────────────────────────────────────────

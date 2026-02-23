@@ -101,12 +101,13 @@ export class Coder {
                 }
 
                 // Push files to the branch
+                const shortSig = this.stampManager.generate(changes.commitMessage).signature.substring(0, 12);
                 for (const file of changes.files) {
                     await forge.createOrUpdateFile(
                         issue.branchName!,
                         file.path,
                         file.content,
-                        `${changes.commitMessage} [${file.path}]`,
+                        `${changes.commitMessage} [${file.path}] [argus:${shortSig}]`,
                     );
                 }
 

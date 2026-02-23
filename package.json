@@ -72,8 +72,13 @@
     "viewsWelcome": [
       {
         "view": "argus.workQueue",
-        "contents": "No issues in queue.\n\n[$(add) Add Repository](command:argus.addRepo)\n\n[$(play) Start Argus](command:argus.start)\n[$(sync) Poll Now](command:argus.pollNow)",
-        "when": "!argus.isRunning"
+        "contents": "Welcome to Argus!\n\nFirst, set up a token so Argus can access your repositories:\n\n[$(key) Set GitHub Token](command:argus.setGitHubToken)\n[$(key) Set GitLab Token](command:argus.setGitLabToken)\n\nThen add a repository:\n\n[$(add) Add Repository](command:argus.addRepo)",
+        "when": "!argus.isRunning && !argus.hasGitHubToken && !argus.hasGitLabToken"
+      },
+      {
+        "view": "argus.workQueue",
+        "contents": "No issues in queue.\n\n[$(add) Add Repository](command:argus.addRepo)\n\n[$(play) Start Argus](command:argus.start)\n[$(sync) Poll Now](command:argus.pollNow)\n\n[$(list-unordered) List Repos](command:argus.listRepos)",
+        "when": "!argus.isRunning && (argus.hasGitHubToken || argus.hasGitLabToken)"
       },
       {
         "view": "argus.workQueue",
@@ -86,7 +91,7 @@
       },
       {
         "view": "argus.repoStats",
-        "contents": "No repositories configured.\n\n[$(add) Add Repository](command:argus.addRepo)"
+        "contents": "No repositories configured.\n\n[$(key) Set GitHub Token](command:argus.setGitHubToken)\n[$(add) Add Repository](command:argus.addRepo)\n[$(list-unordered) List Repos](command:argus.listRepos)"
       },
       {
         "view": "argus.security",
@@ -188,6 +193,25 @@
         "command": "argus.removeRepo",
         "title": "Argus: Remove Repository",
         "icon": "$(trash)"
+      },
+      {
+        "command": "argus.setGitHubToken",
+        "title": "Argus: Set GitHub Token",
+        "icon": "$(key)"
+      },
+      {
+        "command": "argus.setGitLabToken",
+        "title": "Argus: Set GitLab Token",
+        "icon": "$(key)"
+      },
+      {
+        "command": "argus.clearTokens",
+        "title": "Argus: Clear Token"
+      },
+      {
+        "command": "argus.listRepos",
+        "title": "Argus: List Repositories",
+        "icon": "$(list-unordered)"
       }
     ],
     "menus": {

@@ -105,6 +105,13 @@ export interface CodeSearchResult {
     url: string;
 }
 
+/** An entry in a repository tree listing. */
+export interface TreeEntry {
+    path: string;
+    type: 'blob' | 'tree';  // file or directory
+    size?: number;
+}
+
 /** User role in a repository. */
 export type RepoRole = 'owner' | 'admin' | 'maintainer' | 'write' | 'triage' | 'read' | 'none';
 
@@ -150,6 +157,8 @@ export interface Forge {
     createBranch(baseBranch: string, newBranch: string): Promise<void>;
     getFileContent(branch: string, path: string): Promise<string>;
     createOrUpdateFile(branch: string, path: string, content: string, message: string): Promise<void>;
+    /** List files/dirs at a path in the repo tree. Returns paths relative to root. */
+    listTree(branch: string, path?: string, recursive?: boolean): Promise<TreeEntry[]>;
 
     // --- CI ---
     getCommitStatuses(ref: string): Promise<CommitStatus[]>;

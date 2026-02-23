@@ -21,8 +21,8 @@ import { readConfig, toPipelineConfig, parseRepoInput, formatRepoString, addRepo
 import { RateLimiter } from './util/rate-limiter';
 
 // ── Forge ───────────────────────────────────────────────────────────
-import { createForge } from './forge/factory';
-import type { Forge, RepoConfig } from './forge/types';
+import { createForge, hasToken, promptAndStoreToken, clearToken as clearForgeToken } from './forge/factory';
+import type { Forge, RepoConfig, ForgePlatform } from './forge/types';
 import { repoKey } from './forge/types';
 
 // ── Crypto ──────────────────────────────────────────────────────────
@@ -222,6 +222,60 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             vscode.commands.executeCommand('workbench.action.openSettings', 'argus.repos');
         }),
 
+        vscode.commands.registerCommand('argus.setGitHubToken', async () => {
+            const token = await promptAndStoreToken('github', context.secrets);
+            if (token) {
+                forges.clear(); // force re-create with new token
+                vscode.commands.executeCommand('setContext', 'argus.hasGitHubToken', true);
+                vscode.window.showInformationMessage('GitHub token saved. You can now add GitHub repositories.');
+                logger.info('GitHub token updated.');
+            }
+        }),
+
+        vscode.commands.registerCommand('argus.setGitLabToken', async () => {
+            const token = await promptAndStoreToken('gitlab', context.secrets);
+            if (token) {
+                forges.clear();
+                vscode.commands.executeCommand('setContext', 'argus.hasGitLabToken', true);
+                vscode.window.showInformationMessage('GitLab token saved. You can now add GitLab repositories.');
+                logger.info('GitLab token updated.');
+            }
+        }),
+
+        vscode.commands.registerCommand('argus.clearTokens', async () => {
+            const pick = await vscode.window.showQuickPick(
+                [
+                    { label: '$(mark-github) GitHub token', platform: 'github' as ForgePlatform },
+                    { label: '$(git-merge) GitLab token', platform: 'gitlab' as ForgePlatform },
+                ],
+                { title: 'Clear Token', placeHolder: 'Which token to remove?' },
+            );
+            if (!pick) { return; }
+            await clearForgeToken(pick.platform, context.secrets);
+            forges.clear();
+            const ctxKey = pick.platform === 'gitlab' ? 'argus.hasGitLabToken' : 'argus.hasGitHubToken';
+            vscode.commands.executeCommand('setContext', ctxKey, false);
+            vscode.window.showInformationMessage(`${pick.label.replace(/\$\([^)]+\) /, '')} cleared.`);
+            logger.info(`Token cleared for ${pick.platform}`);
+        }),
+
+        vscode.commands.registerCommand('argus.listRepos', async () => {
+            const repos = config.repos;
+            if (repos.length === 0) {
+                vscode.window.showInformationMessage('No repos configured. Use "Argus: Add Repository" to add one.');
+                return;
+            }
+            const items = repos.map((r) => ({
+                label: `$(repo) ${r.owner}/${r.repo}`,
+                description: r.forge,
+                detail: `Poll every ${r.pollIntervalMinutes} min`,
+            }));
+            await vscode.window.showQuickPick(items, {
+                title: `Argus Repositories (${repos.length})`,
+                placeHolder: 'Configured repositories',
+            });
+        }),
+
         vscode.commands.registerCommand('argus.addRepo', async () => {
             const input = await vscode.window.showInputBox({
                 title: 'Add Repository',
@@ -237,6 +291,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             if (!input) { return; }
             const parsed = parseRepoInput(input);
             if (!parsed) { return; }
+
+            // Ensure a token exists for the target platform before saving
+            const tokenExists = await hasToken(parsed.forge, context.secrets);
+            if (!tokenExists) {
+                const platformLabel = parsed.forge === 'gitlab' ? 'GitLab' : 'GitHub';
+                const setNow = await vscode.window.showWarningMessage(
+                    `No ${platformLabel} token configured. A token is required before adding a ${platformLabel} repository.`,
+                    'Set Token Now',
+                    'Cancel',
+                );
+                if (setNow !== 'Set Token Now') { return; }
+                const token = await promptAndStoreToken(parsed.forge, context.secrets);
+                if (!token) { return; }
+                const ctxKey = parsed.forge === 'gitlab' ? 'argus.hasGitLabToken' : 'argus.hasGitHubToken';
+                vscode.commands.executeCommand('setContext', ctxKey, true);
+            }
+
             const added = await addRepoToSettings(input);
             if (added) {
                 const label = formatRepoString(parsed);
@@ -352,6 +423,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             }
         })
     );
+
+    // Set context keys for token presence (drives welcome content)
+    hasToken('github', context.secrets).then(v => vscode.commands.executeCommand('setContext', 'argus.hasGitHubToken', v));
+    hasToken('gitlab', context.secrets).then(v => vscode.commands.executeCommand('setContext', 'argus.hasGitLabToken', v));
 
     // Update system health on activation
     updateHealthView(config);
