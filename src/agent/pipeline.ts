@@ -674,4 +674,124 @@ ${sections.join('\n\n')}
         }
         return grouped;
     }
+
+    /**
+     * Poll all open PRs in the repo for unacknowledged comments.
+     * This runs independently of the issue pipeline — it catches review
+     * comments from GitHub Copilot, human reviewers, and other automated
+     * tools on ANY open PR, not just ones tied to a specific issue.
+     *
+     * For each PR with new external comments:
+     *  1. Fetches conversation + inline review comments
+     *  2. Filters out Argus's own stamped comments
+     *  3. Checks if Argus already posted an acknowledgment newer than all external comments
+     *  4. If not, runs moderation and posts a stamped summary
+     *
+     * Returns the number of PRs that received new acknowledgments.
+     */
+    async pollPRComments(forge: Forge): Promise<number> {
+        const repoKey: RepoKey = `${forge.platform}:${forge.owner}/${forge.repo}`;
+        let acknowledged = 0;
+
+        try {
+            const openPRs = await forge.listOpenPRs();
+            this.logger.debug(`Checking ${openPRs.length} open PR(s) in ${repoKey} for new comments`);
+
+            for (const pr of openPRs) {
+                try {
+                    const responded = await this.checkOnePRForComments(forge, pr.number, repoKey);
+                    if (responded) { acknowledged++; }
+                } catch (err) {
+                    this.logger.error(`Error checking PR #${pr.number}: ${err}`);
+                }
+            }
+
+            if (acknowledged > 0) {
+                this.logger.info(`Acknowledged comments on ${acknowledged} PR(s) in ${repoKey}`);
+            }
+        } catch (err) {
+            this.logger.error(`Failed polling PR comments for ${repoKey}: ${err}`);
+        }
+
+        return acknowledged;
+    }
+
+    /**
+     * Check a single PR for unacknowledged external comments.
+     * Returns true if Argus posted a new acknowledgment.
+     */
+    private async checkOnePRForComments(
+        forge: Forge,
+        prNumber: number,
+        repo: RepoKey,
+    ): Promise<boolean> {
+        const [conversationComments, reviewComments] = await Promise.all([
+            forge.getPRComments(prNumber),
+            forge.getPRReviewComments(prNumber),
+        ]);
+
+        // Separate Argus's stamped comments from external comments
+        const stampedComments = conversationComments.filter(
+            (c) => this.stampManager.hasStamp(c.body),
+        );
+        const externalConversation = conversationComments.filter(
+            (c) => !this.stampManager.hasStamp(c.body),
+        );
+        const externalReviews = reviewComments.filter(
+            (rc) => !this.stampManager.hasStamp(rc.body),
+        );
+
+        if (externalConversation.length === 0 && externalReviews.length === 0) {
+            return false;
+        }
+
+        // Check if Argus already acknowledged all current external comments
+        // by comparing the latest stamped comment date to the latest external date
+        if (stampedComments.length > 0) {
+            const latestStamped = stampedComments.reduce((a, b) =>
+                a.createdAt > b.createdAt ? a : b,
+            );
+            const allExternalDates = [
+                ...externalConversation.map((c) => c.createdAt),
+                ...externalReviews.map((rc) => rc.createdAt),
+            ];
+            const latestExternal = allExternalDates.reduce(
+                (a, b) => (a > b ? a : b), new Date(0),
+            );
+
+            if (latestStamped.createdAt > latestExternal) {
+                this.logger.debug(
+                    `PR #${prNumber}: all comments already acknowledged`,
+                );
+                return false;
+            }
+        }
+
+        // There are new unacknowledged comments — respond
+        this.logger.info(
+            `PR #${prNumber}: ${externalConversation.length} conversation + ${externalReviews.length} review comment(s) unacknowledged — responding`,
+        );
+
+        // Build a stub TrackedIssue to reuse processNewPRComments
+        const stub: TrackedIssue = {
+            issueNumber: 0,
+            repo,
+            title: '',
+            url: '',
+            state: 'done',
+            createdAt: new Date(),
+            bodyHash: '',
+            currentIteration: 0,
+            maxIterations: 0,
+            prNumber,
+        };
+
+        await this.processNewPRComments(forge, stub);
+        this.addActivity(
+            repo, undefined, prNumber,
+            '👀', `Responded to new comments on PR #${prNumber}`,
+        );
+
+        return true;
+    }
 }

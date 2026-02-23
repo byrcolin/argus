@@ -481,6 +481,12 @@ async function pollOnce(
             logger.info(`Enqueued ${enqueued} new issue(s) from ${repoCfg.owner}/${repoCfg.repo}`);
         }
 
+        // Check all open PRs for unacknowledged review comments
+        const prAcknowledged = await pipeline.pollPRComments(forge);
+        if (prAcknowledged > 0) {
+            logger.info(`Acknowledged comments on ${prAcknowledged} PR(s) in ${repoCfg.owner}/${repoCfg.repo}`);
+        }
+
         // Process next issue in queue
         statusBar.setStatus('processing');
         const processed = await pipeline.processNext(forge);

@@ -149,6 +149,16 @@ export class GitHubForge implements Forge {
 
     // ─── Pull Requests ──────────────────────────────────────────────
 
+    async listOpenPRs(): Promise<PullRequest[]> {
+        const { data } = await this.octokit.pulls.list({
+            owner: this.owner,
+            repo: this.repo,
+            state: 'open',
+            per_page: 100,
+        });
+        return data.map((pr) => this.mapPR(pr));
+    }
+
     async listPRsForIssue(issueNumber: number): Promise<PullRequest[]> {
         // GitHub doesn't have a direct "PRs for issue" API,
         // so we search for PRs mentioning the issue number

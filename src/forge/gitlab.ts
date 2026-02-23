@@ -145,6 +145,13 @@ export class GitLabForge implements Forge {
 
     // ─── Pull Requests (Merge Requests in GitLab) ───────────────────
 
+    async listOpenPRs(): Promise<PullRequest[]> {
+        const data = await this.api<any[]>(
+            `/projects/${this.projectPath}/merge_requests?state=opened&per_page=100`
+        );
+        return data.map((mr) => this.mapMR(mr));
+    }
+
     async listPRsForIssue(issueNumber: number): Promise<PullRequest[]> {
         // Search for MRs that mention the issue
         const data = await this.api<any[]>(

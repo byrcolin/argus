@@ -170,6 +170,8 @@ export interface Forge {
     listRepoLabels(): Promise<string[]>;
 
     // --- Pull Requests ---
+    /** List all open PRs in the repo. */
+    listOpenPRs(): Promise<PullRequest[]>;
     listPRsForIssue(issueNumber: number): Promise<PullRequest[]>;
     getPullRequest(prNumber: number): Promise<PullRequest>;
     getPRComments(prNumber: number): Promise<Comment[]>;
