@@ -1,5 +1,13 @@
-out/
-node_modules/
+.vscode/
 .vscode-test/
+src/
+out/test/
+out/**/*.map
+node_modules/
 *.vsix
 .env
+.eslintrc*
+tsconfig.json
+**/*.ts
+**/.gitignore
+.github/
