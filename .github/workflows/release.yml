@@ -1,0 +1,373 @@
+# =============================================================================
+# RELEASE WORKFLOW
+# =============================================================================
+# Only runs from main branch (manual trigger or version tag push).
+#
+# Pipeline:
+#   1. Cancel any running verify builds
+#   2. Pre-flight checks (disk space, already released)
+#   3. Install → compile → lint → type check
+#   4. Build .vsix package
+#   5. Save to external drive
+#   6. Create GitHub Release with .vsix attached
+#   7. Optionally publish to VS Code Marketplace (requires VSCE_PAT secret)
+#
+# Runner Strategy:
+#   - macOS: Always-on Mac server (self-hosted)
+#   - Same concurrency group as o3de-pilot builds
+#
+# To release:
+#   1. Bump version:  npm version patch|minor|major
+#   2. Push with tag: git push origin main --tags
+#
+# Or manually via workflow_dispatch with a version input.
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.2.0). Leave empty to use package.json version.'
+        required: false
+        type: string
+      publish_marketplace:
+        description: 'Publish to VS Code Marketplace'
+        required: false
+        type: boolean
+        default: false
+      skip_preflight:
+        description: 'Skip pre-flight checks'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write   # Create GitHub Release
+  actions: write    # Cancel verify workflows
+
+# Share concurrency group with o3de-pilot — queue, don't cancel
+concurrency:
+  group: self-hosted-builds
+  cancel-in-progress: false
+
+env:
+  ARTIFACT_DIR: /Volumes/4TBNVMEEXT/argus-artifacts/release/${{ github.run_number }}
+
+jobs:
+  # ===========================================================================
+  # CANCEL VERIFY WORKFLOWS
+  # ===========================================================================
+  cancel-verify:
+    name: Cancel Verify Builds
+    runs-on: [self-hosted, macOS]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Cancel running verify workflows
+        run: |
+          echo "🛑 Cancelling any running Argus verify workflows..."
+
+          for workflow in "ci.yml"; do
+            echo "Checking $workflow..."
+            gh run list --repo "${{ github.repository }}" --workflow="$workflow" --status=in_progress --json databaseId -q '.[].databaseId' | while read run_id; do
+              if [ -n "$run_id" ]; then
+                echo "  Cancelling run $run_id"
+                gh run cancel "$run_id" --repo "${{ github.repository }}" || true
+              fi
+            done
+            gh run list --repo "${{ github.repository }}" --workflow="$workflow" --status=queued --json databaseId -q '.[].databaseId' | while read run_id; do
+              if [ -n "$run_id" ]; then
+                echo "  Cancelling queued run $run_id"
+                gh run cancel "$run_id" --repo "${{ github.repository }}" || true
+              fi
+            done
+          done
+
+          echo "✅ Verify workflows cancelled"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # ===========================================================================
+  # PRE-FLIGHT CHECKS
+  # ===========================================================================
+  preflight:
+    name: Pre-flight Checks
+    runs-on: [self-hosted, macOS]
+    needs: cancel-verify
+    if: ${{ github.event.inputs.skip_preflight != 'true' }}
+    outputs:
+      should_continue: ${{ steps.checks.outputs.should_continue }}
+      already_released: ${{ steps.release_check.outputs.already_released }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate branch
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::Releases can only be created from the main branch"
+            exit 1
+          fi
+          echo "✓ Running from main branch"
+
+      - name: Check if already released
+        id: release_check
+        run: |
+          echo "🔍 Checking if commit ${{ github.sha }} was already released..."
+          if git tag -l "released/${{ github.sha }}" | grep -q .; then
+            echo "✅ Found release tag — this commit was already released!"
+            echo "already_released=true" >> $GITHUB_OUTPUT
+          else
+            echo "📦 No release tag found — proceeding with release"
+            echo "already_released=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup artifact directory
+        run: |
+          mkdir -p "${{ env.ARTIFACT_DIR }}"
+          echo "📁 Artifact directory: ${{ env.ARTIFACT_DIR }}"
+
+          # Cleanup old artifacts (keep last 10 releases)
+          echo "🧹 Cleaning up old local artifacts..."
+          cd /Volumes/4TBNVMEEXT/argus-artifacts/release 2>/dev/null || mkdir -p /Volumes/4TBNVMEEXT/argus-artifacts/release
+          ls -dt */ 2>/dev/null | tail -n +11 | xargs rm -rf 2>/dev/null || true
+          echo "✅ Cleanup complete"
+
+      - name: Run pre-flight checks
+        id: checks
+        run: |
+          echo "🔍 Running pre-flight checks..."
+          ERRORS=""
+
+          # Check external drive is mounted
+          if [ ! -d "/Volumes/4TBNVMEEXT" ]; then
+            ERRORS="$ERRORS\n❌ External drive not mounted at /Volumes/4TBNVMEEXT"
+          else
+            AVAILABLE=$(df -g /Volumes/4TBNVMEEXT | tail -1 | awk '{print $4}')
+            echo "✅ External drive available: ${AVAILABLE}GB free"
+          fi
+
+          # Check disk space (need at least 1GB for extension builds)
+          AVAILABLE=$(df -g . | tail -1 | awk '{print $4}')
+          if [ "$AVAILABLE" -lt 1 ]; then
+            ERRORS="$ERRORS\n❌ Low disk space: ${AVAILABLE}GB available (need 1GB)"
+          else
+            echo "✅ Disk space: ${AVAILABLE}GB available"
+          fi
+
+          # Check Node.js
+          if command -v node &> /dev/null; then
+            echo "✅ Node.js: $(node --version)"
+          else
+            ERRORS="$ERRORS\n❌ Node.js not found"
+          fi
+
+          if [ -n "$ERRORS" ]; then
+            echo -e "$ERRORS"
+            echo "should_continue=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          echo "should_continue=true" >> $GITHUB_OUTPUT
+          echo "✅ All pre-flight checks passed"
+
+      - name: Check GitHub storage and cleanup if needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Checking GitHub release count..."
+          RELEASES=$(gh release list --repo "${{ github.repository }}" --limit 100 --json tagName,createdAt 2>/dev/null || echo "[]")
+          RELEASE_COUNT=$(echo "$RELEASES" | jq length)
+          echo "Found $RELEASE_COUNT releases"
+
+          if [ "$RELEASE_COUNT" -gt 20 ]; then
+            echo "::warning::More than 20 releases found, cleaning up oldest..."
+            OLDEST=$(echo "$RELEASES" | jq -r 'sort_by(.createdAt) | .[0:5] | .[].tagName')
+            for TAG in $OLDEST; do
+              echo "  Deleting release: $TAG"
+              gh release delete "$TAG" --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+            done
+          else
+            echo "✓ Release count within limits"
+          fi
+
+  # ===========================================================================
+  # BUILD & PACKAGE
+  # ===========================================================================
+  build:
+    name: "Build .vsix"
+    needs: [preflight]
+    if: |
+      always() &&
+      (needs.preflight.result == 'success' || needs.preflight.result == 'skipped') &&
+      needs.preflight.outputs.already_released != 'true'
+    runs-on: [self-hosted, macOS]
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      vsix_name: ${{ steps.package.outputs.vsix_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Version resolution ──
+      - name: Resolve version
+        id: version
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="$PKG_VERSION"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "📦 Release version: $VERSION (package.json: $PKG_VERSION)"
+
+          if [ "$VERSION" != "$PKG_VERSION" ]; then
+            echo "::warning::Version mismatch: tag=$VERSION, package.json=$PKG_VERSION"
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      # ── Package ──
+      - name: Build .vsix
+        id: package
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          VSIX_NAME="argus-issue-agent-${VERSION}.vsix"
+          npx vsce package --no-git-tag-version -o "$VSIX_NAME"
+          echo "vsix_name=$VSIX_NAME" >> "$GITHUB_OUTPUT"
+          ls -lh "$VSIX_NAME"
+
+      # ── Save to external drive ──
+      - name: Save to external drive
+        run: |
+          mkdir -p "${{ env.ARTIFACT_DIR }}"
+          cp "${{ steps.package.outputs.vsix_name }}" "${{ env.ARTIFACT_DIR }}/"
+          echo "✅ Saved to: ${{ env.ARTIFACT_DIR }}/${{ steps.package.outputs.vsix_name }}"
+
+  # ===========================================================================
+  # GITHUB RELEASE
+  # ===========================================================================
+  release:
+    name: "Create GitHub Release"
+    needs: [build]
+    runs-on: [self-hosted, macOS]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LAST_TAG" ]; then
+            CHANGES=$(git log $LAST_TAG..HEAD --pretty=format:"- %s" --no-merges | head -20)
+          else
+            CHANGES=$(git log -10 --pretty=format:"- %s" --no-merges)
+          fi
+          echo "changes<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Copy .vsix from external drive
+        run: |
+          cp "${{ env.ARTIFACT_DIR }}/${{ needs.build.outputs.vsix_name }}" .
+          ls -lh "${{ needs.build.outputs.vsix_name }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build.outputs.version }}
+          name: Argus v${{ needs.build.outputs.version }}
+          body: |
+            ## Argus v${{ needs.build.outputs.version }}
+
+            ${{ steps.changelog.outputs.changes }}
+
+            ---
+
+            **Install manually:**
+            1. Download `${{ needs.build.outputs.vsix_name }}` below
+            2. In VS Code: **Extensions** → **⋯** → **Install from VSIX…**
+
+            Or from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=accesspointmediagroupllc.argus-issue-agent) (if published).
+          files: ${{ needs.build.outputs.vsix_name }}
+          draft: false
+          prerelease: ${{ contains(needs.build.outputs.version, '-') }}
+          generate_release_notes: true
+
+      - name: Tag as released
+        run: |
+          git tag "released/${{ github.sha }}"
+          git push origin "released/${{ github.sha }}" || true
+
+  # ===========================================================================
+  # MARKETPLACE PUBLISH (optional)
+  # ===========================================================================
+  publish:
+    name: "Publish to Marketplace"
+    needs: [build, release]
+    runs-on: [self-hosted, macOS]
+    if: inputs.publish_marketplace == true || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Copy .vsix from external drive
+        run: |
+          cp "${{ env.ARTIFACT_DIR }}/${{ needs.build.outputs.vsix_name }}" .
+
+      - name: Publish
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -z "$VSCE_PAT" ]; then
+            echo "⚠️  VSCE_PAT secret not set — skipping marketplace publish"
+            echo "To enable: add a Personal Access Token as repository secret VSCE_PAT"
+            exit 0
+          fi
+          echo "📤 Publishing to VS Code Marketplace..."
+          npx vsce publish --pat "$VSCE_PAT" --packagePath "${{ needs.build.outputs.vsix_name }}"
+          echo "✅ Published to marketplace"
+
+  # ===========================================================================
+  # RELEASE COMPLETE
+  # ===========================================================================
+  release-complete:
+    name: "✓ Release Complete"
+    needs: [build, release, publish]
+    runs-on: [self-hosted, macOS]
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "## Argus Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build .vsix | ${{ needs.build.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| GitHub Release | ${{ needs.release.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Marketplace | ${{ needs.publish.result == 'success' && '✅' || needs.publish.result == 'skipped' && '⏭️ Skipped' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Version: \`${{ needs.build.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Artifacts: \`${{ env.ARTIFACT_DIR }}\`" >> $GITHUB_STEP_SUMMARY

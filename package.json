@@ -3,7 +3,8 @@
   "displayName": "Argus — AI Issue Agent",
   "description": "Autonomous AI agent that triages issues, investigates code, creates branches, and opens pull requests with full reasoning transcripts. Multi-forge (GitHub + GitLab), adversary-aware, cryptographically stamped.",
   "version": "0.1.0",
-  "publisher": "byrcolin",
+  "publisher": "accesspointmediagroupllc",
+  "icon": "media/argus-eye-128.png",
   "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.95.0"
@@ -344,7 +345,9 @@
         "argus.trust.trustedUsers": {
           "type": "array",
           "default": [],
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Usernames immune from blocking/reporting (owner tier)."
         },
         "argus.trust.treatMaintainersAsTrusted": {
@@ -364,7 +367,7 @@
         },
         "argus.trust.historyWeight": {
           "type": "number",
-          "default": 1.0,
+          "default": 1,
           "description": "Multiplier for history-based trust modifier."
         },
         "argus.security.threatThreshold": {
@@ -425,12 +428,12 @@
         "argus.prAnalysis.weights": {
           "type": "object",
           "default": {
-            "correctness": 0.30,
-            "completeness": 0.20,
+            "correctness": 0.3,
+            "completeness": 0.2,
             "codeQuality": 0.15,
             "testCoverage": 0.15,
-            "minimalInvasiveness": 0.10,
-            "ciPassing": 0.10
+            "minimalInvasiveness": 0.1,
+            "ciPassing": 0.1
           },
           "description": "Weights for PR scoring dimensions."
         },
@@ -499,30 +502,60 @@
           "default": {},
           "description": "SMTP configuration (host, port, secure, user). Password stored in SecretStorage.",
           "properties": {
-            "host": { "type": "string" },
-            "port": { "type": "number", "default": 587 },
-            "secure": { "type": "boolean", "default": true },
-            "user": { "type": "string" }
+            "host": {
+              "type": "string"
+            },
+            "port": {
+              "type": "number",
+              "default": 587
+            },
+            "secure": {
+              "type": "boolean",
+              "default": true
+            },
+            "user": {
+              "type": "string"
+            }
           }
         },
         "argus.email.defaultRecipients": {
           "type": "array",
           "default": [],
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Default email recipients."
         },
         "argus.email.events": {
           "type": "object",
           "default": {
-            "prOpened": { "enabled": true },
-            "prStuck": { "enabled": true },
-            "ciPassedFinal": { "enabled": true },
-            "threatDetected": { "enabled": true },
-            "userBlocked": { "enabled": true },
-            "emergencyStop": { "enabled": true },
-            "rateLimitWarning": { "enabled": true },
-            "anomalyDetected": { "enabled": true },
-            "systemError": { "enabled": true }
+            "prOpened": {
+              "enabled": true
+            },
+            "prStuck": {
+              "enabled": true
+            },
+            "ciPassedFinal": {
+              "enabled": true
+            },
+            "threatDetected": {
+              "enabled": true
+            },
+            "userBlocked": {
+              "enabled": true
+            },
+            "emergencyStop": {
+              "enabled": true
+            },
+            "rateLimitWarning": {
+              "enabled": true
+            },
+            "anomalyDetected": {
+              "enabled": true
+            },
+            "systemError": {
+              "enabled": true
+            }
           },
           "description": "Per-event email configuration."
         },
@@ -533,12 +566,22 @@
         },
         "argus.email.quietHours": {
           "type": "object",
-          "default": { "start": "23:00", "end": "07:00", "timezone": "UTC" },
+          "default": {
+            "start": "23:00",
+            "end": "07:00",
+            "timezone": "UTC"
+          },
           "description": "Time range during which emails are queued.",
           "properties": {
-            "start": { "type": "string" },
-            "end": { "type": "string" },
-            "timezone": { "type": "string" }
+            "start": {
+              "type": "string"
+            },
+            "end": {
+              "type": "string"
+            },
+            "timezone": {
+              "type": "string"
+            }
           }
         }
       }

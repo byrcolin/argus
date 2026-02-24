@@ -1,0 +1,146 @@
+# =============================================================================
+# VERIFY WORKFLOW
+# =============================================================================
+# Triggered on ANY commit to ANY branch.
+# Pipeline: install → compile → lint → type check → trial package
+#
+# Runner Strategy:
+#   - macOS: Always-on Mac server (self-hosted)
+#   - Same concurrency group as o3de-pilot to prevent resource contention
+#
+# Mirrors the o3de-pilot CI pattern: self-hosted runners, external drive
+# artifacts, path filters for efficiency.
+# =============================================================================
+
+name: Verify Build
+
+on:
+  push:
+    branches:
+      - '**'
+    tags-ignore:
+      - '**'
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - '.eslintrc*'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - '.eslintrc*'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild (ignore cache)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+# Share concurrency group with o3de-pilot — queue, don't cancel
+concurrency:
+  group: self-hosted-builds
+  cancel-in-progress: false
+
+env:
+  ARTIFACT_DIR: /Volumes/4TBNVMEEXT/argus-artifacts/verify/${{ github.sha }}
+
+jobs:
+  # ===========================================================================
+  # STAGE 1: VALIDATE (Lint, Type Check, Compile)
+  # ===========================================================================
+  validate:
+    name: "Lint & Type Check"
+    runs-on: [self-hosted, macOS]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Node.js
+        run: |
+          echo "Node: $(node --version)"
+          echo "npm:  $(npm --version)"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check (strict)
+        run: npx tsc --noEmit
+
+  # ===========================================================================
+  # STAGE 2: TRIAL PACKAGE
+  # ===========================================================================
+  # vsce package validates the extension manifest, icon, README, etc.
+  # This catches marketplace issues before release.
+  trial-package:
+    name: "Trial Package"
+    needs: [validate]
+    runs-on: [self-hosted, macOS]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check for existing build
+        id: cache
+        if: github.event.inputs.force_rebuild != 'true'
+        run: |
+          if [ -f "${{ env.ARTIFACT_DIR }}/argus-verify.vsix" ]; then
+            echo "✅ Found existing build — skipping"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "📦 No existing build found, will build fresh"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build .vsix
+        if: steps.cache.outputs.exists != 'true'
+        run: npx vsce package --no-git-tag-version -o argus-verify.vsix
+
+      - name: Save to external drive
+        if: steps.cache.outputs.exists != 'true'
+        run: |
+          mkdir -p "${{ env.ARTIFACT_DIR }}"
+          cp argus-verify.vsix "${{ env.ARTIFACT_DIR }}/"
+          echo "✅ Saved to: ${{ env.ARTIFACT_DIR }}/argus-verify.vsix"
+          ls -lh "${{ env.ARTIFACT_DIR }}/argus-verify.vsix"
+
+      - name: Report cache hit
+        if: steps.cache.outputs.exists == 'true'
+        run: echo "✅ Build already exists for ${{ github.sha }}"
+
+  # ===========================================================================
+  # VERIFICATION COMPLETE
+  # ===========================================================================
+  verify-complete:
+    name: "✓ Verification Complete"
+    needs: [validate, trial-package]
+    runs-on: [self-hosted, macOS]
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "## Argus Verify Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Lint & Type Check | ${{ needs.validate.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trial Package | ${{ needs.trial-package.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
