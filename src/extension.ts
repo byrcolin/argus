@@ -68,7 +68,7 @@ let statusBar: StatusBar;
 let pipeline: Pipeline;
 let pollTimers: NodeJS.Timeout[] = [];
 let isRunning = false;
-let forges = new Map<string, Forge>();
+const forges = new Map<string, Forge>();
 
 // View providers
 let workQueueProvider: WorkQueueProvider;

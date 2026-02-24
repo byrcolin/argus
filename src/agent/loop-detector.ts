@@ -285,7 +285,7 @@ export class LoopDetector {
         // Walk up to the root
         const visited = new Set<number>();
         let current = prNumber;
-        while (true) {
+        for (;;) {
             visited.add(current);
             const n = nodes.get(current);
             if (!n || n.parents.length === 0) { break; }

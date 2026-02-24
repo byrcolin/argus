@@ -133,7 +133,7 @@ export class GitHubForge implements Forge {
     async listRepoLabels(): Promise<string[]> {
         const labels: string[] = [];
         let page = 1;
-        while (true) {
+        for (;;) {
             const { data } = await this.octokit.issues.listLabelsForRepo({
                 owner: this.owner,
                 repo: this.repo,

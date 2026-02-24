@@ -132,7 +132,7 @@ export class GitLabForge implements Forge {
     async listRepoLabels(): Promise<string[]> {
         const labels: string[] = [];
         let page = 1;
-        while (true) {
+        for (;;) {
             const data = await this.api<any[]>(
                 `/projects/${this.projectPath}/labels?per_page=100&page=${page}`,
             );

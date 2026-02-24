@@ -55,11 +55,11 @@ const FORBIDDEN_PATHS = [
 const SECRET_PATTERNS = [
     /(?:api[_-]?key|apikey|secret|token|password|passwd|credentials?|auth)\s*[:=]\s*['"][^'"]{8,}/gi,
     /(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}/g,                // GitHub tokens
-    /glpat-[A-Za-z0-9_\-]{20,}/g,                                   // GitLab tokens
+    /glpat-[A-Za-z0-9_-]{20,}/g,                                     // GitLab tokens
     /sk-[A-Za-z0-9]{20,}/g,                                         // OpenAI-style keys
     /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g,           // PEM keys
     /(?:AKIA|ASIA)[A-Z0-9]{16}/g,                                   // AWS keys
-    /xox[bpas]-[A-Za-z0-9\-]{10,}/g,                               // Slack tokens
+    /xox[bpas]-[A-Za-z0-9-]{10,}/g,                                  // Slack tokens
 ];
 
 /** Maximum total diff size in characters before warning. */
